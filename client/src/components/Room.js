@@ -108,7 +108,7 @@ const Room = () => {
     }
 
     // Render.com'dan alınan URL buraya eklenecek
-    socketRef.current = io('https://your-render-app.onrender.com');
+    socketRef.current = io('https://fato-dc.onrender.com');
 
     navigator.mediaDevices.getUserMedia({ audio: true })
       .then(stream => {
