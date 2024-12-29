@@ -1,8 +1,19 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { useParams, useLocation, useNavigate } from 'react-router-dom';
-import styled from 'styled-components';
+import styled, { keyframes } from 'styled-components';
 import io from 'socket.io-client';
 import Peer from 'simple-peer';
+
+// Animasyonlar
+const fadeIn = keyframes`
+  from { opacity: 0; }
+  to { opacity: 1; }
+`;
+
+const slideUp = keyframes`
+  from { transform: translateY(20px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+`;
 
 const RoomContainer = styled.div`
   display: flex;
@@ -10,6 +21,7 @@ const RoomContainer = styled.div`
   height: 100vh;
   background-color: #1a1a1a;
   color: white;
+  animation: ${fadeIn} 0.3s ease;
 `;
 
 const Header = styled.header`
@@ -38,11 +50,26 @@ const RoomInfo = styled.div`
     padding: 0.5rem;
     border-radius: 4px;
     cursor: pointer;
+    transition: all 0.2s ease;
     
     &:hover {
       background: #4a4a4a;
+      transform: scale(1.05);
     }
   }
+`;
+
+const StatusMessage = styled.div`
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background-color: rgba(0, 0, 0, 0.8);
+  color: white;
+  padding: 10px 20px;
+  border-radius: 4px;
+  z-index: 1000;
+  animation: ${slideUp} 0.3s ease;
 `;
 
 const Controls = styled.div`
@@ -50,11 +77,13 @@ const Controls = styled.div`
   justify-content: center;
   gap: 20px;
   padding: 20px;
-  background-color: #2a2a2a;
+  background-color: rgba(42, 42, 42, 0.95);
   position: fixed;
   bottom: 0;
   width: 100%;
   box-shadow: 0 -2px 4px rgba(0,0,0,0.2);
+  backdrop-filter: blur(10px);
+  z-index: 100;
 `;
 
 const Button = styled.button`
@@ -83,6 +112,12 @@ const Button = styled.button`
     width: 20px;
     height: 20px;
   }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+  }
 `;
 
 const ParticipantsList = styled.div`
@@ -93,6 +128,7 @@ const ParticipantsList = styled.div`
   margin: 20px;
   height: fit-content;
   box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+  animation: ${fadeIn} 0.3s ease;
 
   h3 {
     margin-bottom: 15px;
@@ -115,10 +151,21 @@ const ParticipantsList = styled.div`
       display: flex;
       align-items: center;
       gap: 8px;
+      transition: all 0.2s ease;
       
+      &:hover {
+        background: #4a4a4a;
+      }
+
       svg {
         width: 16px;
         height: 16px;
+      }
+
+      .user-status {
+        margin-left: auto;
+        font-size: 0.8rem;
+        color: #aaa;
       }
     }
   }
@@ -130,6 +177,7 @@ const MainContent = styled.div`
   padding: 20px;
   gap: 20px;
   margin-bottom: 80px;
+  position: relative;
 `;
 
 const ScreenShareContainer = styled.div`
@@ -139,126 +187,197 @@ const ScreenShareContainer = styled.div`
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 400px;
   position: relative;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+  min-height: 400px;
+  animation: ${fadeIn} 0.3s ease;
 
   video {
-    width: 100%;
-    height: 100%;
+    max-width: 100%;
+    max-height: 100%;
     border-radius: 8px;
   }
 
   p {
-    position: absolute;
-    color: #fff;
+    color: #666;
     text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+
+    svg {
+      width: 48px;
+      height: 48px;
+    }
   }
 `;
 
-const StatusMessage = styled.div`
-  position: fixed;
-  top: 20px;
-  right: 20px;
-  background-color: #2a2a2a;
-  padding: 12px 24px;
-  border-radius: 8px;
-  animation: fadeOut 3s forwards;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-  z-index: 1000;
+const LoadingSpinner = styled.div`
+  border: 3px solid #f3f3f3;
+  border-top: 3px solid #3498db;
+  border-radius: 50%;
+  width: 20px;
+  height: 20px;
+  animation: spin 1s linear infinite;
+  margin: 0 auto;
 
-  @keyframes fadeOut {
-    from { opacity: 1; }
-    to { opacity: 0; }
+  @keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
   }
+`;
+
+const ConnectionStatus = styled.div`
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  padding: 5px 10px;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  background-color: ${props => props.connected ? '#4caf50' : '#f44336'};
+  color: white;
+  display: flex;
+  align-items: center;
+  gap: 5px;
 `;
 
 const Room = () => {
   const { roomId } = useParams();
   const location = useLocation();
   const navigate = useNavigate();
+  
   const [participants, setParticipants] = useState([]);
   const [isMuted, setIsMuted] = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
-  
+  const [isConnected, setIsConnected] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState(null);
+
   const socketRef = useRef();
-  const userAudioRef = useRef();
-  const screenVideoRef = useRef();
   const peersRef = useRef([]);
   const streamRef = useRef();
   const screenStreamRef = useRef();
+  const userAudioRef = useRef();
+  const screenVideoRef = useRef();
+  const statusTimeoutRef = useRef();
 
-  const showStatus = (message) => {
+  // Durum mesajı gösterme fonksiyonu
+  const showStatus = useCallback((message, duration = 3000) => {
     setStatusMessage(message);
-    setTimeout(() => setStatusMessage(''), 3000);
-  };
-
-  const copyRoomId = () => {
-    navigator.clipboard.writeText(roomId);
-    showStatus('Oda ID kopyalandı!');
-  };
-
-  useEffect(() => {
-    if (!location.state?.username) {
-      navigate('/');
-      return;
+    if (statusTimeoutRef.current) {
+      clearTimeout(statusTimeoutRef.current);
     }
+    statusTimeoutRef.current = setTimeout(() => {
+      setStatusMessage('');
+    }, duration);
+  }, []);
 
-    socketRef.current = io('https://fato-dc.onrender.com');
+  // Oda ID'sini kopyalama
+  const copyRoomId = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(roomId);
+      showStatus('Oda ID kopyalandı!');
+    } catch (err) {
+      showStatus('Kopyalama başarısız oldu');
+    }
+  }, [roomId, showStatus]);
 
-    navigator.mediaDevices.getUserMedia({ audio: true })
-      .then(stream => {
-        streamRef.current = stream;
+  // Medya izinlerini kontrol etme
+  const checkMediaPermissions = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      if (userAudioRef.current) {
         userAudioRef.current.srcObject = stream;
+      }
+      return true;
+    } catch (err) {
+      setError('Mikrofon erişimi reddedildi. Lütfen tarayıcı izinlerini kontrol edin.');
+      return false;
+    }
+  }, []);
+
+  // Socket.io bağlantısı kurma
+  useEffect(() => {
+    const initializeConnection = async () => {
+      if (!location.state?.username) {
+        navigate('/');
+        return;
+      }
+
+      setIsLoading(true);
+      const hasPermissions = await checkMediaPermissions();
+      if (!hasPermissions) {
+        setIsLoading(false);
+        return;
+      }
+
+      try {
+        socketRef.current = io(process.env.REACT_APP_SERVER_URL || 'http://localhost:5000');
         
-        socketRef.current.emit('join-room', {
-          roomId,
-          username: location.state.username
+        socketRef.current.on('connect', () => {
+          setIsConnected(true);
+          socketRef.current.emit('join-room', {
+            roomId,
+            username: location.state.username
+          });
         });
 
-        socketRef.current.on('existing-users', users => {
-          const filteredUsers = users.filter(user => user.userId !== socketRef.current.id);
-          setParticipants(filteredUsers);
-          
-          filteredUsers.forEach(user => {
-            const peer = createPeer(user.userId, socketRef.current.id, stream);
-            peersRef.current.push({
-              peerId: user.userId,
-              peer,
-              username: user.username
-            });
+        socketRef.current.on('connect_error', (error) => {
+          setError('Sunucuya bağlanılamadı. Lütfen internet bağlantınızı kontrol edin.');
+          setIsConnected(false);
+        });
+
+        socketRef.current.on('existing-users', (users) => {
+          setParticipants(users.filter(user => user.userId !== socketRef.current.id));
+          users.forEach(user => {
+            if (user.userId !== socketRef.current.id) {
+              const peer = createPeer(user.userId, socketRef.current.id, streamRef.current);
+              peersRef.current.push({ userId: user.userId, peer });
+            }
           });
+          setIsLoading(false);
         });
 
         socketRef.current.on('user-connected', ({ userId, username }) => {
           showStatus(`${username} odaya katıldı`);
-          const peer = createPeer(userId, socketRef.current.id, stream);
-          peersRef.current.push({ peerId: userId, peer, username });
+          const peer = createPeer(userId, socketRef.current.id, streamRef.current);
+          peersRef.current.push({ userId, peer });
           setParticipants(prev => [...prev, { userId, username }]);
         });
 
+        socketRef.current.on('user-disconnected', (userId) => {
+          const participant = participants.find(p => p.userId === userId);
+          if (participant) {
+            showStatus(`${participant.username} odadan ayrıldı`);
+          }
+          
+          peersRef.current = peersRef.current.filter(p => {
+            if (p.userId === userId) {
+              p.peer.destroy();
+              return false;
+            }
+            return true;
+          });
+          
+          setParticipants(prev => prev.filter(p => p.userId !== userId));
+        });
+
         socketRef.current.on('signal', ({ userId, signal }) => {
-          const item = peersRef.current.find(p => p.peerId === userId);
+          const item = peersRef.current.find(p => p.userId === userId);
           if (item) {
             item.peer.signal(signal);
           }
         });
 
-        socketRef.current.on('user-disconnected', userId => {
-          const peerObj = peersRef.current.find(p => p.peerId === userId);
-          if (peerObj) {
-            showStatus(`${peerObj.username} odadan ayrıldı`);
-            peerObj.peer.destroy();
-          }
-          peersRef.current = peersRef.current.filter(p => p.peerId !== userId);
-          setParticipants(prev => prev.filter(p => p.userId !== userId));
-        });
-      })
-      .catch(error => {
-        console.error('Mikrofon erişim hatası:', error);
-        showStatus('Mikrofon erişimi reddedildi');
-      });
+      } catch (err) {
+        setError('Bir hata oluştu. Lütfen sayfayı yenileyin.');
+        setIsLoading(false);
+      }
+    };
+
+    initializeConnection();
 
     return () => {
       socketRef.current?.disconnect();
@@ -269,10 +388,13 @@ const Room = () => {
         screenStreamRef.current.getTracks().forEach(track => track.stop());
       }
       peersRef.current.forEach(({ peer }) => peer.destroy());
+      if (statusTimeoutRef.current) {
+        clearTimeout(statusTimeoutRef.current);
+      }
     };
-  }, [roomId, location.state, navigate]);
+  }, [roomId, location.state, navigate, showStatus, checkMediaPermissions]);
 
-  const createPeer = (userId, myId, stream) => {
+  const createPeer = useCallback((userId, myId, stream) => {
     const peer = new Peer({
       initiator: true,
       trickle: false,
@@ -284,14 +406,18 @@ const Room = () => {
     });
 
     peer.on('stream', remoteStream => {
-      // Ekran paylaşımı veya ses akışını işle
       if (remoteStream.getVideoTracks().length > 0) {
         const video = document.createElement('video');
         video.srcObject = remoteStream;
         video.id = `video-${userId}`;
         video.autoplay = true;
         video.playsInline = true;
-        screenVideoRef.current.appendChild(video);
+        video.style.width = '100%';
+        video.style.borderRadius = '8px';
+        
+        const container = screenVideoRef.current;
+        container.innerHTML = '';
+        container.appendChild(video);
       } else {
         const audio = document.createElement('audio');
         audio.srcObject = remoteStream;
@@ -301,10 +427,15 @@ const Room = () => {
       }
     });
 
-    return peer;
-  };
+    peer.on('error', err => {
+      console.error('Peer bağlantı hatası:', err);
+      showStatus('Bağlantı hatası oluştu');
+    });
 
-  const toggleMute = () => {
+    return peer;
+  }, [showStatus]);
+
+  const toggleMute = useCallback(() => {
     if (streamRef.current) {
       streamRef.current.getAudioTracks().forEach(track => {
         track.enabled = !track.enabled;
@@ -312,28 +443,34 @@ const Room = () => {
       setIsMuted(!isMuted);
       showStatus(isMuted ? 'Ses açıldı' : 'Ses kapatıldı');
     }
-  };
+  }, [isMuted, showStatus]);
 
-  const toggleScreenShare = async () => {
+  const toggleScreenShare = useCallback(async () => {
     if (!isScreenSharing) {
       try {
         const screenStream = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
-          audio: true
+          video: {
+            cursor: 'always',
+            displaySurface: 'monitor'
+          },
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true
+          }
         });
         
         screenStreamRef.current = screenStream;
         
-        // Ekran paylaşımını diğer kullanıcılara gönder
         peersRef.current.forEach(({ peer }) => {
           peer.addStream(screenStream);
         });
 
-        // Yerel görüntüyü göster
         const video = document.createElement('video');
         video.srcObject = screenStream;
         video.autoplay = true;
         video.playsInline = true;
+        video.style.width = '100%';
+        video.style.borderRadius = '8px';
         screenVideoRef.current.innerHTML = '';
         screenVideoRef.current.appendChild(video);
 
@@ -350,42 +487,81 @@ const Room = () => {
     } else {
       stopScreenSharing();
     }
-  };
+  }, [isScreenSharing, showStatus]);
 
-  const stopScreenSharing = () => {
+  const stopScreenSharing = useCallback(() => {
     if (screenStreamRef.current) {
       screenStreamRef.current.getTracks().forEach(track => track.stop());
       
-      // Diğer kullanıcılara ekran paylaşımının durduğunu bildir
       peersRef.current.forEach(({ peer }) => {
         peer.removeStream(screenStreamRef.current);
       });
 
       screenStreamRef.current = null;
       screenVideoRef.current.innerHTML = '';
+      setIsScreenSharing(false);
+      showStatus('Ekran paylaşımı durduruldu');
     }
-    setIsScreenSharing(false);
-    showStatus('Ekran paylaşımı durduruldu');
-  };
+  }, [showStatus]);
 
-  const handleLeaveRoom = () => {
+  const handleLeaveRoom = useCallback(() => {
     if (window.confirm('Odadan ayrılmak istediğinize emin misiniz?')) {
       navigate('/');
     }
-  };
+  }, [navigate]);
+
+  if (isLoading) {
+    return (
+      <RoomContainer>
+        <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>
+          <LoadingSpinner />
+          <p style={{ marginLeft: '10px' }}>Odaya bağlanılıyor...</p>
+        </div>
+      </RoomContainer>
+    );
+  }
+
+  if (error) {
+    return (
+      <RoomContainer>
+        <div style={{ 
+          display: 'flex', 
+          flexDirection: 'column', 
+          justifyContent: 'center', 
+          alignItems: 'center', 
+          height: '100vh',
+          gap: '20px'
+        }}>
+          <div style={{ color: '#f44336' }}>{error}</div>
+          <Button onClick={() => navigate('/')}>Ana Sayfaya Dön</Button>
+        </div>
+      </RoomContainer>
+    );
+  }
 
   return (
     <RoomContainer>
       <Header>
         <RoomInfo>
           <h1>Oda: {roomId}</h1>
-          <button onClick={copyRoomId}>
+          <button onClick={copyRoomId} title="Oda ID'sini Kopyala">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
               <path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z"/>
               <path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h3zm-3-1A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0h-3z"/>
             </svg>
           </button>
         </RoomInfo>
+        <ConnectionStatus connected={isConnected}>
+          {isConnected ? (
+            <>
+              <span>●</span> Bağlı
+            </>
+          ) : (
+            <>
+              <span>●</span> Bağlantı Kesik
+            </>
+          )}
+        </ConnectionStatus>
       </Header>
 
       <MainContent>
@@ -404,11 +580,13 @@ const Room = () => {
                 <path d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm2-3a2 2 0 1 1-4 0 2 2 0 0 1 4 0zm4 8c0 1-1 1-1 1H3s-1 0-1-1 1-4 6-4 6 3 6 4zm-1-.004c-.001-.246-.154-.986-.832-1.664C11.516 10.68 10.289 10 8 10c-2.29 0-3.516.68-4.168 1.332-.678.678-.83 1.418-.832 1.664h10z"/>
               </svg>
               {location.state?.username} (Sen)
-              {isMuted && (
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
-                  <path d="M6.717 3.55A.5.5 0 0 1 7 4v8a.5.5 0 0 1-.812.39L3.825 10.5H1.5A.5.5 0 0 1 1 10V6a.5.5 0 0 1 .5-.5h2.325l2.363-1.89a.5.5 0 0 1 .529-.06zM6 4.04 4.312 5.5H2v5h2.312L6 11.96V4.04zm7.854.606a.5.5 0 0 1 0 .708L12.207 7l1.647 1.646a.5.5 0 0 1-.708.708L11.5 7.707l-1.646 1.647a.5.5 0 0 1-.708-.708L10.793 7 9.146 5.354a.5.5 0 1 1 .708-.708L11.5 6.293l1.646-1.647a.5.5 0 0 1 .708 0z"/>
-                </svg>
-              )}
+              <span className="user-status">
+                {isMuted && (
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                    <path d="M6.717 3.55A.5.5 0 0 1 7 4v8a.5.5 0 0 1-.812.39L3.825 10.5H1.5A.5.5 0 0 1 1 10V6a.5.5 0 0 1 .5-.5h2.325l2.363-1.89a.5.5 0 0 1 .529-.06zM6 4.04 4.312 5.5H2v5h2.312L6 11.96V4.04zm7.854.606a.5.5 0 0 1 0 .708L12.207 7l1.647 1.646a.5.5 0 0 1-.708.708L11.5 7.707l-1.646 1.647a.5.5 0 0 1-.708-.708L10.793 7 9.146 5.354a.5.5 0 1 1 .708-.708L11.5 6.293l1.646-1.647a.5.5 0 0 1 .708 0z"/>
+                  </svg>
+                )}
+              </span>
             </li>
             {participants.map(p => (
               <li key={p.userId}>
@@ -422,8 +600,14 @@ const Room = () => {
         </ParticipantsList>
 
         <ScreenShareContainer ref={screenVideoRef}>
-          {!isScreenSharing && (
-            <p>Henüz ekran paylaşımı yok</p>
+          {!isScreenSharing && !screenVideoRef.current?.hasChildNodes() && (
+            <p>
+              <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M0 3.5A1.5 1.5 0 0 1 1.5 2h13A1.5 1.5 0 0 1 16 3.5v9a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 0 12.5v-9zM1.5 3a.5.5 0 0 0-.5.5v9a.5.5 0 0 0 .5.5h13a.5.5 0 0 0 .5-.5v-9a.5.5 0 0 0-.5-.5h-13z"/>
+                <path d="M2 4.5a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1h-3a.5.5 0 0 1-.5-.5zm0 2a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1h-3a.5.5 0 0 1-.5-.5zm0 2a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1h-3a.5.5 0 0 1-.5-.5zm0 2a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1h-3a.5.5 0 0 1-.5-.5zm8-6a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1h-3a.5.5 0 0 1-.5-.5zm0 2a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1h-3a.5.5 0 0 1-.5-.5zm0 2a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1h-3a.5.5 0 0 1-.5-.5zm0 2a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1h-3a.5.5 0 0 1-.5-.5z"/>
+              </svg>
+              Henüz ekran paylaşımı yok
+            </p>
           )}
         </ScreenShareContainer>
       </MainContent>
@@ -443,7 +627,11 @@ const Room = () => {
           {isMuted ? 'Sesi Aç' : 'Sesi Kapat'}
         </Button>
 
-        <Button onClick={toggleScreenShare} active={isScreenSharing}>
+        <Button 
+          onClick={toggleScreenShare} 
+          active={isScreenSharing}
+          disabled={!isConnected}
+        >
           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
             <path d="M0 3.5A1.5 1.5 0 0 1 1.5 2h13A1.5 1.5 0 0 1 16 3.5v9a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 0 12.5v-9zM1.5 3a.5.5 0 0 0-.5.5v9a.5.5 0 0 0 .5.5h13a.5.5 0 0 0 .5-.5v-9a.5.5 0 0 0-.5-.5h-13z"/>
             <path d="M2 4.5a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1h-3a.5.5 0 0 1-.5-.5zm0 2a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1h-3a.5.5 0 0 1-.5-.5zm0 2a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1h-3a.5.5 0 0 1-.5-.5zm0 2a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1h-3a.5.5 0 0 1-.5-.5zm8-6a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1h-3a.5.5 0 0 1-.5-.5zm0 2a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1h-3a.5.5 0 0 1-.5-.5zm0 2a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1h-3a.5.5 0 0 1-.5-.5zm0 2a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1h-3a.5.5 0 0 1-.5-.5z"/>
